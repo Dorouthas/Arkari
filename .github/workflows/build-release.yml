@@ -48,13 +48,14 @@ jobs:
           if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
             checkout_ref="${INPUT_REF}"
           else
-            checkout_ref="${GITHUB_REF}"
+            checkout_ref="main"
           fi
           echo "checkout_ref=${checkout_ref}" >> "${GITHUB_OUTPUT}"
 
       - name: Checkout Arkari Source
         uses: actions/checkout@v4
         with:
+          repository: KomiMoe/Arkari
           ref: ${{ steps.resolve_ref.outputs.checkout_ref }}
           path: arkari-src
           fetch-depth: 1
@@ -118,6 +119,7 @@ jobs:
       - name: Checkout Arkari Source
         uses: actions/checkout@v4
         with:
+          repository: KomiMoe/Arkari
           ref: ${{ needs.metadata.outputs.checkout_ref }}
           path: arkari-src
           fetch-depth: 1
@@ -271,9 +273,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.metadata.outputs.release_tag }}
-          target_commitish: ${{ needs.metadata.outputs.full_sha }}
+          target_commitish: ${{ github.sha }}
           name: "Arkari - ${{ needs.metadata.outputs.release_tag }}"
-          body: "Automated multi-platform build for ${{ needs.metadata.outputs.full_sha }}."
+          body: "Automated multi-platform build from KomiMoe/Arkari at ${{ needs.metadata.outputs.full_sha }}."
           files: release-assets/*
           fail_on_unmatched_files: true
           draft: false
