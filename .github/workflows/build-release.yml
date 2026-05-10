@@ -1,0 +1,282 @@
+name: Build Arkari Multi-Platform Release
+
+permissions:
+  contents: write
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Commit hash, tag or branch"
+        required: true
+        default: "main"
+        type: string
+      release_tag:
+        description: "Release tag. Leave empty to use the short commit SHA."
+        required: false
+        default: ""
+        type: string
+      prerelease:
+        description: "Mark the GitHub Release as prerelease"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: build-release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  metadata:
+    name: Resolve Build Metadata
+    runs-on: ubuntu-24.04
+    outputs:
+      checkout_ref: ${{ steps.resolve_ref.outputs.checkout_ref }}
+      full_sha: ${{ steps.git_info.outputs.full_sha }}
+      short_sha: ${{ steps.git_info.outputs.short_sha }}
+      release_tag: ${{ steps.release_info.outputs.release_tag }}
+    steps:
+      - name: Resolve checkout ref
+        id: resolve_ref
+        shell: bash
+        env:
+          INPUT_REF: ${{ inputs.ref }}
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            checkout_ref="${INPUT_REF}"
+          else
+            checkout_ref="${GITHUB_REF}"
+          fi
+          echo "checkout_ref=${checkout_ref}" >> "${GITHUB_OUTPUT}"
+
+      - name: Checkout Arkari Source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.resolve_ref.outputs.checkout_ref }}
+          path: arkari-src
+          fetch-depth: 1
+
+      - name: Get commit SHA
+        id: git_info
+        shell: bash
+        run: |
+          cd "arkari-src"
+          echo "full_sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
+          echo "short_sha=$(git rev-parse --short HEAD)" >> "${GITHUB_OUTPUT}"
+
+      - name: Resolve release tag
+        id: release_info
+        shell: bash
+        env:
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+          SHORT_SHA: ${{ steps.git_info.outputs.short_sha }}
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && -n "${INPUT_RELEASE_TAG}" ]]; then
+            release_tag="${INPUT_RELEASE_TAG}"
+          elif [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            release_tag="${GITHUB_REF_NAME}"
+          else
+            release_tag="${SHORT_SHA}"
+          fi
+          echo "release_tag=${release_tag}" >> "${GITHUB_OUTPUT}"
+
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    needs: metadata
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-x64
+            os: windows-latest
+            family: windows
+            llvm_targets: ARM;AArch64;X86
+            archive_ext: 7z
+          - platform: macos-aarch64
+            os: macos-14
+            family: macos
+            llvm_targets: AArch64;X86
+            archive_ext: tar.gz
+          - platform: linux-x86_64
+            os: ubuntu-24.04
+            family: linux
+            llvm_targets: X86
+            archive_ext: tar.gz
+
+    env:
+      BUILD_TYPE: Release
+      BUILD_JOBS: 2
+      LLVM_TARGETS: ${{ matrix.llvm_targets }}
+      ARTIFACT_BASENAME: arkari-${{ matrix.platform }}-${{ needs.metadata.outputs.short_sha }}
+
+    steps:
+      - name: Checkout Arkari Source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.metadata.outputs.checkout_ref }}
+          path: arkari-src
+          fetch-depth: 1
+
+      - name: Setup MSBuild
+        if: matrix.family == 'windows'
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Install Windows dependencies
+        if: matrix.family == 'windows'
+        shell: pwsh
+        run: |
+          choco install ninja sccache -y --no-progress
+
+      - name: Install macOS dependencies
+        if: matrix.family == 'macos'
+        shell: bash
+        run: |
+          brew list ninja >/dev/null 2>&1 || brew install ninja
+          brew list sccache >/dev/null 2>&1 || brew install sccache
+
+      - name: Install Linux dependencies
+        if: matrix.family == 'linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build sccache
+
+      - name: Configure Windows
+        if: matrix.family == 'windows'
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSINSTALL=%%i"
+          if not defined VSINSTALL exit /b 1
+          call "%VSINSTALL%\VC\Auxiliary\Build\vcvars64.bat"
+          cmake -S "arkari-src/llvm" -B "build" -G "Ninja" ^
+            -DCMAKE_BUILD_TYPE="%BUILD_TYPE%" ^
+            -DLLVM_ENABLE_PROJECTS="clang;lld" ^
+            -DLLVM_TARGETS_TO_BUILD="%LLVM_TARGETS%" ^
+            -DLLVM_INCLUDE_TESTS=OFF ^
+            -DLLVM_INCLUDE_EXAMPLES=OFF ^
+            -DLLVM_INCLUDE_BENCHMARKS=OFF ^
+            -DLLVM_TOOL_LLVM_SHLIB_BUILD=OFF ^
+            -DLLVM_ENABLE_LIBXML2=OFF ^
+            -DLLVM_ENABLE_ZLIB=OFF ^
+            -DLLVM_ENABLE_ZSTD=OFF ^
+            -DLLVM_ENABLE_ASSERTIONS=OFF ^
+            -DLLVM_RELEASE_ENABLE_LTO=OFF ^
+            -DLLVM_PARALLEL_LINK_JOBS=1 ^
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded ^
+            -DCMAKE_INSTALL_PREFIX="%GITHUB_WORKSPACE%/install" ^
+            -DCMAKE_C_COMPILER=cl ^
+            -DCMAKE_CXX_COMPILER=cl ^
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache ^
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
+
+      - name: Configure Unix
+        if: matrix.family != 'windows'
+        shell: bash
+        run: |
+          cmake_args=(
+            -S "arkari-src/llvm"
+            -B "build"
+            -G "Ninja"
+            -DCMAKE_BUILD_TYPE="${BUILD_TYPE}"
+            -DCMAKE_INSTALL_PREFIX="${GITHUB_WORKSPACE}/install"
+            -DLLVM_ENABLE_PROJECTS="clang;lld"
+            -DLLVM_TARGETS_TO_BUILD="${LLVM_TARGETS}"
+            -DLLVM_INCLUDE_TESTS=OFF
+            -DLLVM_INCLUDE_EXAMPLES=OFF
+            -DLLVM_INCLUDE_BENCHMARKS=OFF
+            -DLLVM_TOOL_LLVM_SHLIB_BUILD=OFF
+            -DLLVM_ENABLE_LIBXML2=OFF
+            -DLLVM_ENABLE_ZLIB=OFF
+            -DLLVM_ENABLE_ZSTD=OFF
+            -DLLVM_ENABLE_ASSERTIONS=OFF
+            -DLLVM_RELEASE_ENABLE_LTO=OFF
+            -DLLVM_RELEASE_ENABLE_PGO=OFF
+            -DLLVM_PARALLEL_LINK_JOBS=1
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
+          )
+
+          if [[ "${{ matrix.family }}" == "macos" ]]; then
+            cmake_args+=(-DCMAKE_OSX_ARCHITECTURES=arm64)
+          else
+            cmake_args+=(-DLLVM_ENABLE_PIC=ON)
+          fi
+
+          cmake "${cmake_args[@]}"
+
+      - name: Build and install Windows
+        if: matrix.family == 'windows'
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSINSTALL=%%i"
+          if not defined VSINSTALL exit /b 1
+          call "%VSINSTALL%\VC\Auxiliary\Build\vcvars64.bat"
+          cmake --build "build" --config "%BUILD_TYPE%" --target install --verbose --parallel %BUILD_JOBS%
+
+      - name: Build and install Unix
+        if: matrix.family != 'windows'
+        shell: bash
+        run: |
+          cmake --build "build" --config "${BUILD_TYPE}" --target install --verbose --parallel "${BUILD_JOBS}"
+
+      - name: Package Windows artifact
+        if: matrix.family == 'windows'
+        shell: pwsh
+        run: |
+          $packageRoot = "package/$env:ARTIFACT_BASENAME"
+          New-Item -Path "$packageRoot/clang/lib" -ItemType Directory -Force | Out-Null
+          Copy-Item -Path "install/bin" -Destination "$packageRoot/bin" -Recurse -Force
+          Copy-Item -Path "arkari-src/clang/lib/Headers" -Destination "$packageRoot/clang/lib/Headers" -Recurse -Force
+          New-Item -Path "dist" -ItemType Directory -Force | Out-Null
+          Push-Location "package"
+          7z a -t7z -mmt -mf -mhc -mhcf -m0=LZMA2 -mx=9 "../dist/$env:ARTIFACT_BASENAME.7z" "$env:ARTIFACT_BASENAME"
+          Pop-Location
+
+      - name: Package Unix artifact
+        if: matrix.family != 'windows'
+        shell: bash
+        run: |
+          package_root="package/${ARTIFACT_BASENAME}"
+          mkdir -p "${package_root}/clang/lib" "dist"
+          cp -a "install/bin" "${package_root}/bin"
+          cp -a "arkari-src/clang/lib/Headers" "${package_root}/clang/lib/Headers"
+          tar -C "package" -czf "dist/${ARTIFACT_BASENAME}.tar.gz" "${ARTIFACT_BASENAME}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: dist/${{ env.ARTIFACT_BASENAME }}.${{ matrix.archive_ext }}
+          if-no-files-found: error
+
+  release:
+    name: Publish Release
+    runs-on: ubuntu-24.04
+    needs:
+      - metadata
+      - build
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Upload Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.metadata.outputs.release_tag }}
+          target_commitish: ${{ needs.metadata.outputs.full_sha }}
+          name: "Arkari - ${{ needs.metadata.outputs.release_tag }}"
+          body: "Automated multi-platform build for ${{ needs.metadata.outputs.full_sha }}."
+          files: release-assets/*
+          fail_on_unmatched_files: true
+          draft: false
+          prerelease: ${{ github.event_name == 'workflow_dispatch' && inputs.prerelease }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
