@@ -39,52 +39,61 @@ jobs:
       short_sha: ${{ steps.git_info.outputs.short_sha }}
       release_tag: ${{ steps.release_info.outputs.release_tag }}
     steps:
- - name: Resolve checkout ref
-    id: resolve_ref
-    shell: bash
-    env:
-      INPUT_REF: ${{ inputs.ref }}
-      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-    run: |
-     if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
-        checkout_ref="${INPUT_REF}"
-      else
-       checkout_ref="${DEFAULT_BRANCH}"
-     fi
-     echo "checkout_ref=${checkout_ref}" >> "${GITHUB_OUTPUT}"
-
-
-      - name: Checkout Arkari Source
-        uses: actions/checkout@v4
-        with:
-          repository: KomiMoe/Arkari
-          ref: ${{ steps.resolve_ref.outputs.checkout_ref }}
-          path: arkari-src
-          fetch-depth: 1
-
-      - name: Get commit SHA
-        id: git_info
-        shell: bash
-        run: |
-          cd "arkari-src"
-          echo "full_sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
-          echo "short_sha=$(git rev-parse --short HEAD)" >> "${GITHUB_OUTPUT}"
-
-      - name: Resolve release tag
-        id: release_info
-        shell: bash
-        env:
-          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
-          SHORT_SHA: ${{ steps.git_info.outputs.short_sha }}
-        run: |
-          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && -n "${INPUT_RELEASE_TAG}" ]]; then
-            release_tag="${INPUT_RELEASE_TAG}"
-          elif [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
-            release_tag="${GITHUB_REF_NAME}"
-          else
-            release_tag="${SHORT_SHA}"
-          fi
-          echo "release_tag=${release_tag}" >> "${GITHUB_OUTPUT}"
+      metadata:
+        name: Resolve Build Metadata
+        runs-on: ubuntu-24.04
+        outputs:
+          checkout_ref: ${{ steps.resolve_ref.outputs.checkout_ref }}
+          full_sha: ${{ steps.git_info.outputs.full_sha }}
+          short_sha: ${{ steps.git_info.outputs.short_sha }}
+          release_tag: ${{ steps.release_info.outputs.release_tag }}
+        steps:
+          - name: Resolve checkout ref
+            id: resolve_ref
+            shell: bash
+            env:
+              INPUT_REF: ${{ inputs.ref }}
+              DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+            run: |
+              if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+                checkout_ref="${INPUT_REF}"
+              else
+                checkout_ref="${DEFAULT_BRANCH}"
+              fi
+              echo "checkout_ref=${checkout_ref}" >> "${GITHUB_OUTPUT}"
+    
+          - name: Checkout Arkari Source
+            uses: actions/checkout@v4
+            with:
+              repository: KomiMoe/Arkari
+              ref: ${{ steps.resolve_ref.outputs.checkout_ref }}
+              path: arkari-src
+              fetch-depth: 1
+    
+          - name: Get commit SHA
+            id: git_info
+            shell: bash
+            run: |
+              cd "arkari-src"
+              echo "full_sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
+              echo "short_sha=$(git rev-parse --short HEAD)" >> "${GITHUB_OUTPUT}"
+    
+          - name: Resolve release tag
+            id: release_info
+            shell: bash
+            env:
+              INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+              SHORT_SHA: ${{ steps.git_info.outputs.short_sha }}
+            run: |
+              if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && -n "${INPUT_RELEASE_TAG}" ]]; then
+                release_tag="${INPUT_RELEASE_TAG}"
+              elif [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+                release_tag="${GITHUB_REF_NAME}"
+              else
+                release_tag="${SHORT_SHA}"
+              fi
+              echo "release_tag=${release_tag}" >> "${GITHUB_OUTPUT}"
+    
 
   build:
     name: Build ${{ matrix.platform }}
