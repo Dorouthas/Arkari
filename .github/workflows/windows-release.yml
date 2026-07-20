@@ -1,0 +1,168 @@
+name: Arkari Windows Release
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - llvm-22.x
+    paths:
+      - cmake/**
+      - llvm/**
+      - clang/**
+      - lld/**
+      - third-party/**
+      - .github/workflows/windows-release.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: arkari-windows-release-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SCCACHE_GHA_ENABLED: "true"
+  BUILD_DIR: ${{ github.workspace }}\build
+  SOURCE_DIR: ${{ github.workspace }}\source
+  PACKAGE_DIR: ${{ github.workspace }}\Arkari-Windows-x64-Release
+
+jobs:
+  build:
+    name: Windows x64 Release
+    runs-on: windows-latest
+    timeout-minutes: 300
+
+    steps:
+      # Arkari is a large LLVM monorepo. Fetch only the directories required
+      # to build Clang and LLD, and download blobs lazily.
+      - name: Sparse checkout
+        shell: pwsh
+        run: |
+          git config --global core.longpaths true
+          git init "$env:SOURCE_DIR"
+          git -C "$env:SOURCE_DIR" remote add origin "https://github.com/${{ github.repository }}.git"
+          git -C "$env:SOURCE_DIR" sparse-checkout init --cone
+          git -C "$env:SOURCE_DIR" sparse-checkout set cmake llvm clang lld third-party
+          git -C "$env:SOURCE_DIR" -c protocol.version=2 fetch `
+            --depth=1 `
+            --no-tags `
+            --filter=blob:none `
+            origin "${{ github.ref }}"
+          git -C "$env:SOURCE_DIR" checkout --detach FETCH_HEAD
+
+      - name: Set up MSVC x64
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Enable sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Configure Release build
+        shell: pwsh
+        run: |
+          cmake -S "$env:SOURCE_DIR\llvm" -B "$env:BUILD_DIR" -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
+            "-DCMAKE_C_FLAGS=/utf-8" `
+            "-DCMAKE_CXX_FLAGS=/utf-8 /EHsc" `
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache `
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache `
+            "-DLLVM_ENABLE_PROJECTS=clang;lld" `
+            -DLLVM_TARGETS_TO_BUILD=X86 `
+            -DLLVM_ENABLE_ASSERTIONS=OFF `
+            -DLLVM_ENABLE_EXPENSIVE_CHECKS=OFF `
+            -DLLVM_ENABLE_LTO=OFF `
+            -DLLVM_ENABLE_ZLIB=OFF `
+            -DLLVM_ENABLE_ZSTD=OFF `
+            -DLLVM_ENABLE_LIBXML2=OFF `
+            -DLLVM_ENABLE_TERMINFO=OFF `
+            -DLLVM_ENABLE_LIBEDIT=OFF `
+            -DLLVM_ENABLE_RPMALLOC=ON `
+            -DLLVM_ENABLE_BINDINGS=OFF `
+            -DLLVM_ENABLE_PLUGINS=OFF `
+            -DLLVM_INCLUDE_TESTS=OFF `
+            -DLLVM_INCLUDE_EXAMPLES=OFF `
+            -DLLVM_INCLUDE_BENCHMARKS=OFF `
+            -DLLVM_BUILD_TESTS=OFF `
+            -DLLVM_BUILD_EXAMPLES=OFF `
+            -DLLVM_BUILD_BENCHMARKS=OFF `
+            -DLLVM_BUILD_DOCS=OFF `
+            -DCLANG_INCLUDE_TESTS=OFF `
+            -DCLANG_BUILD_EXAMPLES=OFF `
+            -DCLANG_ENABLE_ARCMT=OFF `
+            -DCLANG_ENABLE_STATIC_ANALYZER=OFF `
+            -DCLANG_PLUGIN_SUPPORT=OFF `
+            -DLLD_INCLUDE_TESTS=OFF `
+            -DLLVM_PARALLEL_LINK_JOBS=2
+
+      # Build only the programs needed for a compact Windows toolchain.
+      - name: Build Clang and LLD
+        shell: pwsh
+        run: |
+          cmake --build "$env:BUILD_DIR" `
+            --config Release `
+            --parallel "$env:NUMBER_OF_PROCESSORS" `
+            --target clang lld llvm-ar llvm-lib llvm-rc
+
+      - name: Package toolchain
+        shell: pwsh
+        run: |
+          $binDir = Join-Path $env:PACKAGE_DIR "bin"
+          $libDir = Join-Path $env:PACKAGE_DIR "lib"
+          $licenseDir = Join-Path $env:PACKAGE_DIR "licenses"
+          New-Item -ItemType Directory -Force $binDir, $libDir, $licenseDir | Out-Null
+
+          $tools = @(
+            "clang.exe",
+            "clang++.exe",
+            "clang-cl.exe",
+            "clang-cpp.exe",
+            "lld.exe",
+            "lld-link.exe",
+            "ld.lld.exe",
+            "ld64.lld.exe",
+            "wasm-ld.exe",
+            "llvm-ar.exe",
+            "llvm-lib.exe",
+            "llvm-ranlib.exe",
+            "llvm-rc.exe"
+          )
+
+          foreach ($tool in $tools) {
+            $source = Join-Path "$env:BUILD_DIR\bin" $tool
+            if (Test-Path $source) {
+              Copy-Item $source $binDir
+            }
+          }
+
+          Copy-Item "$env:BUILD_DIR\lib\clang" $libDir -Recurse
+          Copy-Item "$env:SOURCE_DIR\llvm\LICENSE.TXT" "$licenseDir\LLVM-LICENSE.txt"
+          Copy-Item "$env:SOURCE_DIR\clang\LICENSE.TXT" "$licenseDir\Clang-LICENSE.txt"
+          Copy-Item "$env:SOURCE_DIR\lld\LICENSE.TXT" "$licenseDir\LLD-LICENSE.txt"
+
+          @(
+            "Arkari Windows x64 Release",
+            "Commit: ${{ github.sha }}",
+            "Built: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss UTC' -AsUTC)"
+          ) | Set-Content "$env:PACKAGE_DIR\BUILD-INFO.txt" -Encoding UTF8
+
+      - name: Verify binaries
+        shell: pwsh
+        run: |
+          & "$env:PACKAGE_DIR\bin\clang.exe" --version
+          & "$env:PACKAGE_DIR\bin\lld-link.exe" --version
+
+      - name: Upload Windows Release
+        uses: actions/upload-artifact@v7
+        with:
+          name: Arkari-Windows-x64-Release-${{ github.sha }}
+          path: ${{ env.PACKAGE_DIR }}
+          compression-level: 1
+          retention-days: 14
+          if-no-files-found: error
