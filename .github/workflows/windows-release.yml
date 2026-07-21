@@ -10,6 +10,7 @@ on:
       - llvm/**
       - clang/**
       - lld/**
+      - libunwind/**
       - third-party/**
       - .github/workflows/windows-release.yml
 
@@ -34,7 +35,7 @@ jobs:
 
     steps:
       # Arkari is a large LLVM monorepo. Fetch only the directories required
-      # to build Clang and LLD, and download blobs lazily.
+      # to build Clang and LLD, including libunwind's Mach-O headers.
       - name: Sparse checkout
         shell: pwsh
         run: |
@@ -42,7 +43,7 @@ jobs:
           git init "$env:SOURCE_DIR"
           git -C "$env:SOURCE_DIR" remote add origin "https://github.com/${{ github.repository }}.git"
           git -C "$env:SOURCE_DIR" sparse-checkout init --cone
-          git -C "$env:SOURCE_DIR" sparse-checkout set cmake llvm clang lld third-party
+          git -C "$env:SOURCE_DIR" sparse-checkout set cmake llvm clang lld libunwind third-party
           git -C "$env:SOURCE_DIR" -c protocol.version=2 fetch `
             --depth=1 `
             --no-tags `
